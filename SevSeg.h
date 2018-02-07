@@ -64,7 +64,15 @@ public:
 
   void setSegments(byte segs[]);
   void setChars(char str[]);
+  void setText(char str[]);
   void blank(void);
+  void clear(void);
+  void shift(byte);
+  void shiftClear();
+void clock();
+  int blinkInterval, scrollingSpeed, scrollingTimes;
+  bool blinkingDigits[MAXNUMDIGITS];
+  int scrolling;
 
 private:
   void setNewNum(long numToShow, char decPlaces, bool hex=0);
@@ -80,6 +88,7 @@ private:
   byte digitCodes[MAXNUMDIGITS];
   int ledOnTime;
   unsigned long prevUpdateTime;
+  String scrollingText;
 };
 
 #endif //SevSeg_h

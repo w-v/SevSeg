@@ -25,7 +25,7 @@
   Version 3.3.0 - February 2017
   Added the ability to keep leading zeros. This is now an extra
   parameter in the begin() function.
-
+  
   Version 3.2.0 - December 2016
   Updated to Arduino 1.5 Library Specification
   New display function - no longer consumes processor time with delay()
@@ -50,11 +50,18 @@
   Supports both common anode and common cathode displays.
 */
 
-#include "SevSeg.h"
+#include <SevSeg.h>
+//#include <iostream>
 
 #define BLANK_IDX 36 // Must match with 'digitCodeMap'
 #define DASH_IDX 37
-#define PERIOD_IDX 38
+
+  //Shift Register Pin   Arduino Pin 
+#define SevSeg_IN        8   //D2
+//#define SevSeg_LATCH     9   //D3
+#define SevSeg_CLK       9   //D4
+
+
 
 static const long powersOf10[] = {
   1, // 10^0
@@ -80,6 +87,16 @@ static const long powersOf16[] = {
   0x10000000
 }; // 16^7
 
+static const long powersOf2[] = {
+  0b00000001, // 2^0
+  0b00000010,
+  0b00000100,
+  0b00001000,
+  0b00010000,
+  0b00100000,
+  0b01000000,
+  0b10000000,
+}; // 2^7
 // The codes below indicate which segments must be illuminated to display
 // each number.
 static const byte digitCodeMap[] = {
@@ -101,12 +118,12 @@ static const byte digitCodeMap[] = {
   B01111001, // 69  'E'
   B01110001, // 70  'F'
   B00111101, // 71  'G'
-  B01110110, // 72  'H'
+  B01110100, // 72  'H'
   B00000110, // 73  'I'
   B00001110, // 74  'J'
   B01110110, // 75  'K'  Same as 'H'
   B00111000, // 76  'L'
-  B00000000, // 77  'M'  NO DISPLAY
+  B00110111, // 77  'M'  
   B01010100, // 78  'n'
   B00111111, // 79  'O'
   B01110011, // 80  'P'
@@ -114,15 +131,14 @@ static const byte digitCodeMap[] = {
   B01010000, // 82  'r'
   B01101101, // 83  'S'
   B01111000, // 84  't'
-  B00111110, // 85  'U'
-  B00111110, // 86  'V'  Same as 'U'
-  B00000000, // 87  'W'  NO DISPLAY
+  B00011100, // 85  'U'
+  B00111110, // 86  'V'  
+  B00111110, // 87  'W'  Same as 'V' 
   B01110110, // 88  'X'  Same as 'H'
   B01101110, // 89  'y'
   B01011011, // 90  'Z'  Same as '2'
   B00000000, // 32  ' '  BLANK
   B01000000, // 45  '-'  DASH
-  B10000000, // 46  '.'  PERIOD
 };
 
 // Constant pointers to constant data
@@ -134,12 +150,15 @@ const byte * const alphaCodes = digitCodeMap + 10;
 SevSeg::SevSeg()
 {
   // Initial value
-  ledOnTime = 2000; // Corresponds to a brightness of 100
+  ledOnTime = 200; // Corresponds to a brightness of 100
   numDigits = 0;
   prevUpdateIdx = 0;
   prevUpdateTime = 0;
   resOnSegments = 0;
   updateWithDelays = 0;
+  scrollingSpeed = 500; //how often are characters scrolled
+  blinkInterval = 1000; //(ms)
+  scrolling = 0;
 }
 
 
@@ -153,11 +172,11 @@ SevSeg::SevSeg()
 void SevSeg::begin(byte hardwareConfig, byte numDigitsIn, byte digitPinsIn[],
                    byte segmentPinsIn[], bool resOnSegmentsIn,
                    bool updateWithDelaysIn, bool leadingZerosIn) {
-
   resOnSegments = resOnSegmentsIn;
   updateWithDelays = updateWithDelaysIn;
   leadingZeros = leadingZerosIn;
-
+  
+  
   numDigits = numDigitsIn;
   //Limit the max number of digits to prevent overflowing
   if (numDigits > MAXNUMDIGITS) numDigits = MAXNUMDIGITS;
@@ -188,6 +207,10 @@ void SevSeg::begin(byte hardwareConfig, byte numDigitsIn, byte digitPinsIn[],
   digitOff = !digitOn;
   segmentOff = !segmentOn;
 
+
+  for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
+  	blinkingDigits[digitNum ] = 0;
+  }
   // Save the input pin numbers to library variables
   for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
     segmentPins[segmentNum] = segmentPinsIn[segmentNum];
@@ -203,14 +226,42 @@ void SevSeg::begin(byte hardwareConfig, byte numDigitsIn, byte digitPinsIn[],
     digitalWrite(digitPins[digit], digitOff);
   }
 
-  for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-    pinMode(segmentPins[segmentNum], OUTPUT);
-    digitalWrite(segmentPins[segmentNum], segmentOff);
-  }
+  // Pin initialization
+  // In this version, I use a shift register to drive the segments
+  // the register is getting a 1 and 7 0s, lighting all segments in turn
+  // A capacitor is put between the latch and the clock pin, this way the register is latched when input is clocked
+  // In the end, the display requires 6 pins (4 digits, clock and input) instead of 12
+  pinMode(SevSeg_IN, OUTPUT);
+  pinMode(SevSeg_CLK, OUTPUT);
+  digitalWrite(SevSeg_CLK, LOW);
+  digitalWrite(SevSeg_IN, LOW);
 
   setNewNum(0, 0); // Initialise the number displayed to 0
 }
 
+//Sending a clock signal
+void SevSeg::clock(){
+  digitalWrite(SevSeg_CLK, HIGH);
+  delayMicroseconds(50);
+  digitalWrite(SevSeg_CLK, LOW);
+}
+
+// lights segment number b given that segment b-1 (or 7 if b=0) was the previously lit
+void SevSeg::shift(byte b){
+  if(b == 0){
+    digitalWrite(SevSeg_IN, HIGH);
+  }
+  clock();
+  digitalWrite(SevSeg_IN, LOW);
+}
+
+//clear the display (all digits to LOW)
+void SevSeg::clear(){
+  for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
+    digitalWrite(digitPins[digitNum], digitOff);
+  }
+  return;
+}
 
 // refreshDisplay
 /******************************************************************************/
@@ -230,15 +281,28 @@ void SevSeg::begin(byte hardwareConfig, byte numDigitsIn, byte digitPinsIn[],
 //    on. It will move to the next digit/segment after being called again (if
 //    enough time has passed).
 
+// I kept only what I used (resistors on digits)
 void SevSeg::refreshDisplay() {
 
-  if (!updateWithDelays) {
+    // I am not cheking wether to update or not
+    // Because I am using refreshDisplay() in an interrupt routine
+ 
+    if(scrolling){
+      if(scrollingTimes){
+        if(((millis()-scrolling)/scrollingSpeed/(scrollingText.length()-numDigits)) > scrollingTimes){
+          scrolling = 0;
+	  clear();
+	}
+      }
+      else {
+        char f[128];
+	int scrollingPosition = ((millis()-scrolling)/scrollingSpeed)%(scrollingText.length()-numDigits);
+	scrollingText.substring(scrollingPosition,scrollingPosition+numDigits).toCharArray(f,128);
+        setChars(f);
+      }
+    }
 
-    // Exit if it's not time for the next display change
-    if (micros() - prevUpdateTime < ledOnTime) return;
-    prevUpdateTime = micros();
 
-    if (!resOnSegments) {
       /**********************************************/
       // RESISTORS ON DIGITS, UPDATE WITHOUT DELAYS
 
@@ -247,7 +311,6 @@ void SevSeg::refreshDisplay() {
       for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
         digitalWrite(digitPins[digitNum], digitOff);
       }
-      digitalWrite(segmentPins[prevUpdateIdx], segmentOff);
 
       prevUpdateIdx++;
       if (prevUpdateIdx >= 8) prevUpdateIdx = 0;
@@ -255,87 +318,17 @@ void SevSeg::refreshDisplay() {
       byte segmentNum = prevUpdateIdx;
 
       // Illuminate the required digits for the new segment
-      digitalWrite(segmentPins[segmentNum], segmentOn);
+      shift(segmentNum);
       for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
+	    if(blinkingDigits[digitNum]){
+	      if((millis()/blinkInterval)%2 == 0){
+		continue;
+	      }
+	    }
         if (digitCodes[digitNum] & (1 << segmentNum)) { // Check a single bit
           digitalWrite(digitPins[digitNum], digitOn);
         }
       }
-    }
-    else {
-      /**********************************************/
-      // RESISTORS ON SEGMENTS, UPDATE WITHOUT DELAYS
-
-
-      // Turn all lights off for the previous digit
-      for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-        digitalWrite(segmentPins[segmentNum], segmentOff);
-      }
-      digitalWrite(digitPins[prevUpdateIdx], digitOff);
-
-      prevUpdateIdx++;
-      if (prevUpdateIdx >= numDigits) prevUpdateIdx = 0;
-
-      byte digitNum = prevUpdateIdx;
-
-      // Illuminate the required segments for the new digit
-      digitalWrite(digitPins[digitNum], digitOn);
-      for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-        if (digitCodes[digitNum] & (1 << segmentNum)) { // Check a single bit
-          digitalWrite(segmentPins[segmentNum], segmentOn);
-        }
-      }
-    }
-  }
-
-  else {
-    if (!resOnSegments) {
-      /**********************************************/
-      // RESISTORS ON DIGITS, UPDATE WITH DELAYS
-      for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-
-        // Illuminate the required digits for this segment
-        digitalWrite(segmentPins[segmentNum], segmentOn);
-        for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
-          if (digitCodes[digitNum] & (1 << segmentNum)) { // Check a single bit
-            digitalWrite(digitPins[digitNum], digitOn);
-          }
-        }
-
-        //Wait with lights on (to increase brightness)
-        delayMicroseconds(ledOnTime);
-
-        //Turn all lights off
-        for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
-          digitalWrite(digitPins[digitNum], digitOff);
-        }
-        digitalWrite(segmentPins[segmentNum], segmentOff);
-      }
-    }
-    else {
-      /**********************************************/
-      // RESISTORS ON SEGMENTS, UPDATE WITH DELAYS
-      for (byte digitNum = 0 ; digitNum < numDigits ; digitNum++) {
-
-        // Illuminate the required segments for this digit
-        digitalWrite(digitPins[digitNum], digitOn);
-        for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-          if (digitCodes[digitNum] & (1 << segmentNum)) { // Check a single bit
-            digitalWrite(segmentPins[segmentNum], segmentOn);
-          }
-        }
-
-        //Wait with lights on (to increase brightness)
-        delayMicroseconds(ledOnTime);
-
-        //Turn all lights off
-        for (byte segmentNum = 0 ; segmentNum < 8 ; segmentNum++) {
-          digitalWrite(segmentPins[segmentNum], segmentOff);
-        }
-        digitalWrite(digitPins[digitNum], digitOff);
-      }
-    }
-  }
 }
 
 // setBrightness
@@ -443,10 +436,8 @@ void SevSeg::setChars(char str[])
     digitCodes[digit] = 0;
   }
 
-  byte strIdx = 0; // Current position within str[]
-  byte additionDigits = 0; // For periods (".") added to cells as decimal point
-  for (byte digitNum = 0; digitNum < (numDigits + additionDigits); digitNum++) {
-    char ch = str[strIdx];
+  for (byte digitNum = 0; digitNum < numDigits; digitNum++) {
+    char ch = str[digitNum];
     if (ch == '\0') break; // NULL string terminator
     if (ch >= '0' && ch <= '9') { // Numerical
       digitCodes[digitNum] = numeralCodes[ch - '0'];
@@ -460,35 +451,10 @@ void SevSeg::setChars(char str[])
     else if (ch == ' ') {
       digitCodes[digitNum] = digitCodeMap[BLANK_IDX];
     }
-    else if (ch == '.') {
-      boolean periodInOwnCell = false;
-
-      if (strIdx == 0) {
-        // If this is the first character, add period in its own cell
-        periodInOwnCell = true;
-      }
-      else if (str[strIdx-1] == '.') {
-        // Previous cell already is or has a period, this gets its own cell
-        periodInOwnCell = true;
-      }
-
-      if (periodInOwnCell) {
-        // Add period in own cell like any other character
-        digitCodes[digitNum] = digitCodeMap[PERIOD_IDX];
-      }
-      else {
-        // Add decimal point to previous cell and set loop to run +1 times
-        digitNum--;
-        digitCodes[digitNum] |= digitCodeMap[PERIOD_IDX];
-        additionDigits++;
-      }
-    }
     else {
       // Every unknown character is shown as a dash
       digitCodes[digitNum] = digitCodeMap[DASH_IDX];
     }
-
-    strIdx++;
   }
 }
 
@@ -569,6 +535,20 @@ void SevSeg::setDigitCodes(byte digits[], char decPlaces) {
       }
     }
   }
+}
+
+
+void SevSeg::setText(char str[]) {
+        int scrollingTimesIn(0);
+	if(!scrolling){
+		String k(str);
+		scrolling = millis();
+		scrollingTimes=scrollingTimesIn;
+		scrollingText = "    "+k+"    ";
+		char f[64];
+		scrollingText.toCharArray(f,64);
+		setChars(f);
+	}
 }
 
 /// END ///
